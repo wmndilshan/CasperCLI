@@ -1,0 +1,14 @@
+click
+ddgs
+fastmcp
+fastapi
+httpx
+inngest
+openai
+platformdirs
+pydantic
+python-dotenv
+rich
+tiktoken
+tomli
+uvicorn
