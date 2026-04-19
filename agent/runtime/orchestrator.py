@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import os
 from pathlib import Path
+import shlex
 import shutil
 import sys
 from typing import Protocol
@@ -32,6 +34,11 @@ from agent.runtime.patch_pipeline import (
     PatchPipeline,
     PatchProposal,
 )
+from agent.runtime.proposal_generator import (
+    LLMPatchProposalGenerator,
+    ProposalGenerationRequest,
+    ProposalGenerationResult,
+)
 from agent.runtime.resource_manager import ResourceManager
 from agent.runtime.scheduler import Scheduler, TaskExecutionContext
 from agent.runtime.session_store import HybridSessionRecord, HybridSessionStore
@@ -50,6 +57,7 @@ from agent.verification.validators import (
     ChangedFilesValidator,
     CommandValidator,
 )
+from config.config import Config
 from jobs.inngest_scheduler import InngestScheduler
 from agent.runtime.task_graph import TaskResult
 
@@ -78,6 +86,13 @@ class MemoryManager(Protocol):
     async def build_planner_context(self, state: SessionState) -> object: ...
 
     async def update_from_outcome(self, state: SessionState, outcome: object) -> None: ...
+
+
+class ProposalGenerator(Protocol):
+    async def generate(
+        self,
+        request: ProposalGenerationRequest,
+    ) -> ProposalGenerationResult: ...
 
 
 @dataclass
@@ -166,12 +181,16 @@ class _HybridRuntimeServices:
 class HybridOrchestrator:
     workspace_root: Path
     sessions_root: Path | None = None
+    config: Config | None = None
     synthesizer: TeamSynthesizer = field(default_factory=TeamSynthesizer)
     event_bus: RuntimeEventBus = field(default_factory=RuntimeEventBus)
     lock_manager: LockManager = field(default_factory=LockManager)
     session_store: HybridSessionStore | None = None
+    proposal_generator: ProposalGenerator | None = None
 
     def __post_init__(self) -> None:
+        if self.config is None:
+            self.config = Config(cwd=self.workspace_root)
         if getattr(self.lock_manager, "state_path", None) is None:
             self.lock_manager = LockManager(
                 self.workspace_root / ".CasperCode" / "hybrid_runtime" / "locks.json"
@@ -181,6 +200,8 @@ class HybridOrchestrator:
                 self.workspace_root / ".CasperCode" / "hybrid_runtime" / "sessions"
             )
             self.session_store = HybridSessionStore(root)
+        if self.proposal_generator is None:
+            self.proposal_generator = LLMPatchProposalGenerator(self.config)
 
     def inspect_team(
         self,
@@ -270,9 +291,29 @@ class HybridOrchestrator:
                     )
 
                 if task.id.startswith("implement-"):
+                    proposal_source = "manual"
+                    proposal_generation: ProposalGenerationResult | None = None
+                    proposals = request.task_patches.get(task.id)
+                    if proposals is None:
+                        proposal_source = "generated"
+                        proposal_generation = await self.proposal_generator.generate(
+                            ProposalGenerationRequest(
+                                session_id=session_id,
+                                goal=request.goal,
+                                workspace_root=request.workspace_root,
+                                team_spec=team_spec,
+                                agent_spec=agent.spec,
+                                task=task,
+                                artifact_store=services.artifact_store,
+                            )
+                        )
+                        proposals = proposal_generation.proposals
+                    else:
+                        proposals = list(proposals)
+
                     staged = 0
                     task_validations: list[dict[str, object]] = []
-                    for proposal in request.task_patches.get(task.id, []):
+                    for proposal in proposals:
                         worker_spec = next(
                             spec for spec in team_spec.agents if spec.id == proposal.agent_id
                         )
@@ -283,7 +324,25 @@ class HybridOrchestrator:
                     services.artifact_store.put(
                         kind=ArtifactKind.DECISION_LOG,
                         key=f"{session_id}:{task.id}",
-                        content={"staged": staged, "task": task.title},
+                        content={
+                            "staged": staged,
+                            "task": task.title,
+                            "proposal_source": proposal_source,
+                            "generated_count": len(proposals),
+                            "generator_skipped_reason": (
+                                proposal_generation.skipped_reason
+                                if proposal_generation
+                                else None
+                            ),
+                            "generator_errors": (
+                                proposal_generation.errors if proposal_generation else []
+                            ),
+                            "generator_response": (
+                                proposal_generation.final_response
+                                if proposal_generation
+                                else None
+                            ),
+                        },
                         created_by=agent.id,
                         task_id=task.id,
                     )
@@ -571,6 +630,9 @@ class HybridOrchestrator:
         team_spec: TeamSpec,
         workspace_root: Path,
     ) -> VerificationPipeline:
+        python_targets = self._python_validation_targets(workspace_root)
+        has_python_files = self._workspace_has_python_files(workspace_root)
+        target_args = " ".join(shlex.quote(target) for target in python_targets)
         validators = []
         for name in team_spec.review_policy.validators:
             if name == "changed_files":
@@ -579,26 +641,83 @@ class HybridOrchestrator:
                 validators.append(BoundaryConsistencyValidator())
             elif name == "tests" and (workspace_root / "tests").exists():
                 validators.append(
-                    CommandValidator("tests", f"{sys.executable} -m unittest discover")
+                    CommandValidator("tests", f"{sys.executable} -m unittest discover -s tests")
                 )
-            elif name == "syntax" and any(workspace_root.rglob("*.py")):
+            elif name == "syntax" and has_python_files:
                 validators.append(
-                    CommandValidator("syntax", f"{sys.executable} -m compileall .")
+                    CommandValidator(
+                        "syntax",
+                        f"{sys.executable} -m compileall {target_args}",
+                    )
                 )
-            elif name == "typecheck" and any(workspace_root.rglob("*.py")):
+            elif name == "typecheck" and has_python_files:
                 if shutil.which("mypy"):
-                    validators.append(CommandValidator("typecheck", "mypy ."))
+                    validators.append(
+                        CommandValidator("typecheck", f"mypy {target_args}")
+                    )
                 elif shutil.which("pyright"):
-                    validators.append(CommandValidator("typecheck", "pyright"))
-            elif name == "lint" and any(workspace_root.rglob("*.py")):
+                    validators.append(
+                        CommandValidator("typecheck", f"pyright {target_args}")
+                    )
+            elif name == "lint" and has_python_files:
                 if shutil.which("ruff"):
-                    validators.append(CommandValidator("lint", "ruff check ."))
+                    validators.append(
+                        CommandValidator("lint", f"ruff check {target_args}")
+                    )
                 elif shutil.which("flake8"):
-                    validators.append(CommandValidator("lint", "flake8 ."))
-            elif name == "security" and any(workspace_root.rglob("*.py")):
+                    validators.append(
+                        CommandValidator("lint", f"flake8 {target_args}")
+                    )
+            elif name == "security" and has_python_files:
                 if shutil.which("bandit"):
-                    validators.append(CommandValidator("security", "bandit -q -r ."))
+                    validators.append(
+                        CommandValidator("security", f"bandit -q -r {target_args}")
+                    )
         return VerificationPipeline(validators, event_bus=self.event_bus)
+
+    def _python_validation_targets(self, workspace_root: Path) -> list[str]:
+        ignored_dirs = {
+            ".git",
+            ".venv",
+            "venv",
+            "node_modules",
+            "__pycache__",
+            "dist",
+            "build",
+            ".mypy_cache",
+            ".pytest_cache",
+            ".CasperCode",
+        }
+        targets: list[str] = []
+        for child in sorted(workspace_root.iterdir()):
+            if child.name in ignored_dirs:
+                continue
+            if child.name.startswith(".") and child.name != ".github":
+                continue
+            if child.is_dir():
+                targets.append(child.name)
+            elif child.is_file() and child.suffix == ".py":
+                targets.append(child.name)
+        return targets or ["."]
+
+    def _workspace_has_python_files(self, workspace_root: Path) -> bool:
+        ignored_dirs = {
+            ".git",
+            ".venv",
+            "venv",
+            "node_modules",
+            "__pycache__",
+            "dist",
+            "build",
+            ".mypy_cache",
+            ".pytest_cache",
+            ".CasperCode",
+        }
+        for current_root, dirs, files in os.walk(workspace_root):
+            dirs[:] = [item for item in dirs if item not in ignored_dirs]
+            if any(filename.endswith(".py") for filename in files):
+                return True
+        return False
 
     def _build_task_graph(
         self,

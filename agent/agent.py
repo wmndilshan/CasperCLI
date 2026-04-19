@@ -1,11 +1,12 @@
 from __future__ import annotations
+import json
 from typing import AsyncGenerator, Awaitable, Callable
 from agent.events import AgentEvent, AgentEventType
 from agent.session import Session
 from client.response import StreamEventType, TokenUsage, ToolCall, ToolResultMessage
 from config.config import Config
-from prompts.system import create_loop_breaker_prompt
-from tools.base import ToolConfirmation
+from prompts.system import create_loop_breaker_prompt, create_tool_validation_prompt
+from tools.base import ToolConfirmation, ToolResult
 
 
 class Agent:
@@ -85,7 +86,7 @@ class Agent:
                             "type": "function",
                             "function": {
                                 "name": tc.name,
-                                "arguments": str(tc.arguments),
+                                "arguments": json.dumps(tc.arguments, sort_keys=True),
                             },
                         }
                         for tc in tool_calls
@@ -110,6 +111,8 @@ class Agent:
                 return
 
             tool_call_results: list[ToolResultMessage] = []
+            validation_prompts: list[str] = []
+            seen_tool_call_signatures: set[str] = set()
 
             for tool_call in tool_calls:
                 yield AgentEvent.tool_call_start(
@@ -124,19 +127,46 @@ class Agent:
                     args=tool_call.arguments,
                 )
 
-                result = await self.session.tool_registry.invoke(
-                    tool_call.name,
-                    tool_call.arguments,
-                    self.config.cwd,
-                    self.session.hook_system,
-                    self.session.approval_manager,
-                )
+                signature = self._tool_call_signature(tool_call)
+                if signature in seen_tool_call_signatures:
+                    result = ToolResult.error_result(
+                        "Duplicate tool call in same turn skipped",
+                        metadata={
+                            "tool_name": tool_call.name,
+                            "duplicate_tool_call": True,
+                        },
+                    )
+                else:
+                    seen_tool_call_signatures.add(signature)
+                    result = await self.session.tool_registry.invoke(
+                        tool_call.name,
+                        tool_call.arguments,
+                        self.config.cwd,
+                        self.session.hook_system,
+                        self.session.approval_manager,
+                    )
 
                 yield AgentEvent.tool_call_complete(
                     tool_call.call_id,
                     tool_call.name,
                     result,
                 )
+
+                validation_errors = self._validation_errors_from_result(result)
+                if validation_errors:
+                    self.session.loop_detector.record_action(
+                        "tool_validation_error",
+                        tool_name=tool_call.name,
+                        args=tool_call.arguments,
+                        error="; ".join(validation_errors),
+                    )
+                    validation_prompts.append(
+                        create_tool_validation_prompt(
+                            tool_call.name or "unknown_tool",
+                            validation_errors,
+                            tool_call.arguments if isinstance(tool_call.arguments, dict) else None,
+                        )
+                    )
 
                 tool_call_results.append(
                     ToolResultMessage(
@@ -152,6 +182,9 @@ class Agent:
                     tool_result.content,
                 )
 
+            for prompt in validation_prompts:
+                self.session.context_manager.add_user_message(prompt)
+
             loop_detection_error = self.session.loop_detector.check_for_loop()
             if loop_detection_error:
                 loop_prompt = create_loop_breaker_prompt(loop_detection_error)
@@ -163,6 +196,21 @@ class Agent:
 
             self.session.context_manager.prune_tool_outputs()
         yield AgentEvent.agent_error(f"Maximum turns ({max_turns}) reached")
+
+    def _tool_call_signature(self, tool_call: ToolCall) -> str:
+        arguments = tool_call.arguments if isinstance(tool_call.arguments, dict) else {}
+        return f"{tool_call.name}:{json.dumps(arguments, sort_keys=True, default=str)}"
+
+    def _validation_errors_from_result(self, result: ToolResult) -> list[str]:
+        if result.success:
+            return []
+        if not result.error or not result.error.startswith("Invalid parameters:"):
+            return []
+        metadata = result.metadata if isinstance(result.metadata, dict) else {}
+        validation_errors = metadata.get("validation_errors", [])
+        if isinstance(validation_errors, list) and validation_errors:
+            return [str(item) for item in validation_errors]
+        return [result.error]
 
     async def __aenter__(self) -> Agent:
         await self.session.initialize()

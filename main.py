@@ -485,7 +485,7 @@ class HybridCLI:
     def __init__(self, config: Config):
         self.config = config
         self.tui = TUI(config, console)
-        self.orchestrator = HybridOrchestrator(config.cwd)
+        self.orchestrator = HybridOrchestrator(config.cwd, config=config)
 
     async def inspect_team(
         self,

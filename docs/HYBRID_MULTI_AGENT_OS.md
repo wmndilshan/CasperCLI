@@ -129,16 +129,17 @@ Patch Decision
 ## Extension Points
 
 - Replace heuristic synthesis with an LLM-backed planner by swapping `TeamSynthesizer.inspect_workspace()` and `TeamSynthesizer.synthesize()`.
-- Attach real LLM patch-generation workers by feeding validated `PatchProposal` objects into `HybridRunRequest.task_patches` or by adding a worker adapter in `agent/agents/llm_worker.py`.
+- Extend `agent/runtime/proposal_generator.py` to support richer patch shapes than full-file create/update/delete proposals.
 - Add stronger validators in `agent/verification/validators/`.
 - Extend `LockManager` from file-level leases to symbol-level or API-contract locks.
 - Add durable background execution by plugging the scheduler into the existing job runtime.
 
 ## Current Boundaries
 
-The hybrid OS foundations are production-structured and tested, but one major integration remains intentionally separate:
+The hybrid OS foundations are production-structured and tested, but one major integration still remains intentionally separate:
 
 - the legacy conversational `Agent` tool loop still edits through the old tool path
-- the new hybrid runtime already enforces transactional patches, but direct LLM-worker patch generation is the next adapter to build
+- the hybrid runtime now includes an LLM-backed proposal adapter that uses read-only inspection tools plus `submit_patch_proposal`
+- proposal generation is intentionally conservative in v1 and emits full-file transactional fragments rather than semantic/symbol-level edits
 
-That split is deliberate so the repo now has a stable deterministic core before the legacy write path is retired.
+That split is deliberate so the repo now has a stable deterministic core while the legacy direct-write path is phased out behind the transactional pipeline.

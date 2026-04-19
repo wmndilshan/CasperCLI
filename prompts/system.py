@@ -346,3 +346,31 @@ To break out of this loop, please:
 
 Do not repeat the same action again.
 """
+
+
+def create_tool_validation_prompt(
+    tool_name: str,
+    validation_errors: list[str],
+    arguments: dict[str, object] | None = None,
+) -> str:
+    errors = "\n".join(f"- {error}" for error in validation_errors) or "- Invalid tool parameters"
+    attempted_arguments = arguments or {}
+
+    return f"""
+[SYSTEM NOTICE: Invalid Tool Call]
+
+Your last tool call to `{tool_name}` was rejected because its arguments did not match the tool schema.
+
+Attempted arguments:
+{attempted_arguments}
+
+Validation errors:
+{errors}
+
+Before calling `{tool_name}` again:
+1. Read the tool schema carefully
+2. Supply every required field with valid JSON arguments
+3. If you do not know the required path or value yet, use a different tool first or ask the user
+
+Do not repeat the same invalid tool call again.
+"""

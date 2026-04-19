@@ -18,6 +18,13 @@ class LoopDetector:
             if isinstance(args, dict):
                 for k in sorted(args.keys()):
                     output.append(f"{k}={str(args[k])}")
+        elif action_type == "tool_validation_error":
+            output.append(details.get("tool_name", ""))
+            args = details.get("args", {})
+            if isinstance(args, dict):
+                for k in sorted(args.keys()):
+                    output.append(f"{k}={str(args[k])}")
+            output.append(details.get("error", ""))
         elif action_type == "response":
             output.append(details.get("text", ""))
 

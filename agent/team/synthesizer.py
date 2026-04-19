@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+import os
 from pathlib import Path
 import re
 from uuid import uuid4
@@ -73,17 +74,17 @@ class TeamSynthesizer:
             }:
                 config_files.append(child.name)
 
-        for path in root.rglob("*"):
-            if any(part in _IGNORED_DIRS for part in path.parts):
-                continue
-            if not path.is_file():
-                continue
-            file_count += 1
-            language = _LANGUAGE_BY_SUFFIX.get(path.suffix.lower())
-            if language:
-                languages[language] += 1
-            if path.name in {"package.json", "pyproject.toml", "requirements.txt"}:
-                config_files.append(str(path.relative_to(root)))
+        for current_root, dirs, files in os.walk(root):
+            dirs[:] = [item for item in dirs if item not in _IGNORED_DIRS]
+            current_root_path = Path(current_root)
+            for filename in files:
+                path = current_root_path / filename
+                file_count += 1
+                language = _LANGUAGE_BY_SUFFIX.get(path.suffix.lower())
+                if language:
+                    languages[language] += 1
+                if path.name in {"package.json", "pyproject.toml", "requirements.txt"}:
+                    config_files.append(str(path.relative_to(root)))
 
         dominant_languages = [name for name, _ in languages.most_common(4)]
         lower_dirs = {item.lower() for item in top_level_dirs}
@@ -370,7 +371,7 @@ class TeamSynthesizer:
                 capabilities=["tool_execution", "sandboxed_commands"],
                 permissions=["execute:tools"],
                 forbidden_actions=["plan:team"],
-                allowed_tools=["shell", "read_file", "list_dir", "grep_search", "glob_search"],
+                allowed_tools=["shell", "read_file", "list_dir", "grep", "glob"],
                 output_contract={"artifacts": ["decision_log"]},
             ),
         ]
@@ -521,7 +522,7 @@ class TeamSynthesizer:
         return mapping.get(role, [])
 
     def _tools_for_role(self, role: str) -> list[str]:
-        base = ["read_file", "list_dir", "grep_search", "glob_search"]
+        base = ["read_file", "list_dir", "grep", "glob"]
         if role in {"backend", "frontend", "devops", "ml", "security", "generalist"}:
             return [*base, "shell", "todo"]
         if role == "qa":
