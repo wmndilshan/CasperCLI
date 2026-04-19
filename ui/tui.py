@@ -762,6 +762,138 @@ class TUI:
 
         return response.lower() in {"y", "yes"}
 
+    def show_team_spec(self, team_spec) -> None:
+        self.console.print()
+        table = Table(box=box.SIMPLE_HEAVY, expand=True)
+        table.add_column("Agent", no_wrap=True)
+        table.add_column("Type", style="muted", no_wrap=True)
+        table.add_column("Role", style="code", no_wrap=True)
+        table.add_column("Scope", style="code")
+        table.add_column("Tools", style="muted")
+
+        for agent in team_spec.agents:
+            scope = ", ".join(agent.scope.writable_patterns[:3] or agent.scope.include_patterns[:3]) or "-"
+            tools = ", ".join(agent.allowed_tools[:4]) or "-"
+            table.add_row(
+                agent.id,
+                getattr(agent.type, "value", str(agent.type)),
+                agent.role,
+                scope,
+                tools,
+            )
+
+        summary = Table.grid(padding=(0, 1))
+        summary.add_column(style="muted", justify="right", no_wrap=True)
+        summary.add_column(style="code")
+        summary.add_row("name", team_spec.name)
+        summary.add_row("preset", team_spec.preset_name)
+        summary.add_row("profile", getattr(team_spec.project_profile, "value", str(team_spec.project_profile)))
+        summary.add_row("strict", str(team_spec.strict))
+        summary.add_row("parallelism", str(team_spec.coordination_policy.parallelism))
+        summary.add_row("verify", getattr(team_spec.review_policy.mode, "value", str(team_spec.review_policy.mode)))
+
+        self.console.print(
+            Panel(
+                Group(summary, table),
+                title=Text("Hybrid Team", style="highlight"),
+                title_align="left",
+                border_style="border",
+                box=box.ROUNDED,
+                padding=(1, 2),
+            )
+        )
+
+    def show_task_graph(self, task_graph) -> None:
+        self.console.print()
+        table = Table(box=box.SIMPLE_HEAVY, expand=True)
+        table.add_column("Task", style="highlight")
+        table.add_column("Role", no_wrap=True)
+        table.add_column("Status", no_wrap=True)
+        table.add_column("Deps", style="muted")
+        table.add_column("Artifacts", style="code")
+
+        for task in task_graph.nodes.values():
+            table.add_row(
+                task.id,
+                task.role,
+                task.status,
+                ", ".join(task.dependencies) or "-",
+                ", ".join(task.produced_artifacts) or "-",
+            )
+
+        self.console.print(
+            Panel(
+                table,
+                title=Text("Task Graph", style="highlight"),
+                title_align="left",
+                border_style="border",
+                box=box.ROUNDED,
+                padding=(1, 2),
+            )
+        )
+
+    def show_locks(self, locks: dict[str, list[dict[str, object]]]) -> None:
+        self.console.print()
+        if not locks:
+            self.console.print(
+                Panel(
+                    Text("No active locks.", style="muted"),
+                    title=Text("Locks", style="highlight"),
+                    title_align="left",
+                    border_style="border",
+                    box=box.ROUNDED,
+                    padding=(1, 2),
+                )
+            )
+            return
+
+        table = Table(box=box.SIMPLE_HEAVY, expand=True)
+        table.add_column("Resource", style="highlight")
+        table.add_column("Owner", style="code")
+        table.add_column("Type", no_wrap=True)
+        table.add_column("Expires", style="muted", no_wrap=True)
+        for resource_id, leases in locks.items():
+            for lease in leases:
+                table.add_row(
+                    resource_id,
+                    str(lease.get("owner_id", "-")),
+                    str(lease.get("lock_type", "-")),
+                    str(lease.get("expires_at", "-")),
+                )
+        self.console.print(
+            Panel(
+                table,
+                title=Text("Locks", style="highlight"),
+                title_align="left",
+                border_style="border",
+                box=box.ROUNDED,
+                padding=(1, 2),
+            )
+        )
+
+    def show_commit_decision(self, decision) -> None:
+        self.console.print()
+        details = Table.grid(padding=(0, 1))
+        details.add_column(style="muted", justify="right", no_wrap=True)
+        details.add_column(style="code")
+        details.add_row("bundle", decision.bundle_id)
+        details.add_row("status", getattr(decision.status, "value", str(decision.status)))
+        details.add_row("applied", ", ".join(decision.applied_paths) or "-")
+        details.add_row("rejected", ", ".join(decision.rejected_reasons) or "-")
+        if decision.verification_report:
+            details.add_row("verified", str(decision.verification_passed))
+
+        self.console.print(
+            Panel(
+                details,
+                title=Text("Patch Decision", style="highlight"),
+                title_align="left",
+                border_style="border",
+                box=box.ROUNDED,
+                padding=(1, 2),
+            )
+        )
+
     def show_help(self) -> None:
         help_text = """
 ## Commands

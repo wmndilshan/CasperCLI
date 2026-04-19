@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Any
 from pydantic import BaseModel, Field, model_validator
 
+from agent.team.models import OwnershipMode, VerificationMode
+
 
 class ModelConfig(BaseModel):
     name: str = "deepseek-chat"
@@ -53,9 +55,15 @@ class ApprovalPolicy(str, Enum):
     ON_REQUEST = "on-request"
     ON_FAILURE = "on-failure"
     AUTO = "auto"
-    AUTO_EDIT = "auto-edut"
+    AUTO_EDIT = "auto-edit"
     NEVER = "never"
     YOLO = "yolo"
+
+    @classmethod
+    def _missing_(cls, value):
+        if value == "auto-edut":
+            return cls.AUTO_EDIT
+        return super()._missing_(value)
 
 
 class HookTrigger(str, Enum):
@@ -81,6 +89,23 @@ class HookConfig(BaseModel):
         return self
 
 
+class HybridRuntimeConfig(BaseModel):
+    enabled: bool = True
+    team: str = "auto"
+    team_size: int = Field(default=4, ge=1, le=16)
+    strict: bool = False
+    parallel: bool = True
+    max_parallel_agents: int = Field(default=4, ge=1, le=32)
+    verify: VerificationMode = VerificationMode.LIGHTWEIGHT
+    planner_model: str | None = None
+    worker_model: str | None = None
+    dry_run: bool = False
+    show_task_graph: bool = False
+    show_team: bool = False
+    apply_patches: bool = False
+    ownership_mode: OwnershipMode = OwnershipMode.STRICT
+
+
 class Config(BaseModel):
     model: ModelConfig = Field(default_factory=ModelConfig)
     cwd: Path = Field(default_factory=Path.cwd)
@@ -102,13 +127,18 @@ class Config(BaseModel):
     user_instructions: str | None = None
 
     debug: bool = False
+    hybrid: HybridRuntimeConfig = Field(default_factory=HybridRuntimeConfig)
 
     @property
     def planner_model_name(self) -> str:
+        if self.hybrid.planner_model:
+            return self.hybrid.planner_model
         return os.environ.get("PLANNER_MODEL", "deepseek-reasoner")
 
     @property
     def executor_model_name(self) -> str:
+        if self.hybrid.worker_model:
+            return self.hybrid.worker_model
         return os.environ.get("EXECUTOR_MODEL", "deepseek-coder")
 
     @property
@@ -159,14 +189,14 @@ class Config(BaseModel):
     def temperature(self) -> float:
         return self.model.temperature
 
-    @model_name.setter
-    def temperature(self, value: str) -> None:
+    @temperature.setter
+    def temperature(self, value: float) -> None:
         self.model.temperature = value
 
-    def validate(self) -> list[str]:
+    def validate(self, *, require_api_key: bool = True) -> list[str]:
         errors: list[str] = []
 
-        if not self.api_key:
+        if require_api_key and not self.api_key:
             errors.append("No API key found. Set API_KEY environment variable")
 
         if not self.cwd.exists():

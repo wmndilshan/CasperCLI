@@ -10,9 +10,11 @@ from agent.agent import Agent
 from agent.events import AgentEventType
 from agent.multi_agent import AgentDesigner, MultiAgentCoordinator
 from agent.persistence import PersistenceManager, SessionSnapshot
+from agent.runtime.orchestrator import HybridOrchestrator, HybridRunRequest
 from agent.session import Session
 from config.config import ApprovalPolicy, Config
 from config.loader import load_config
+from agent.team import OwnershipMode, TeamSynthesisOptions, VerificationMode, list_team_presets
 from ui.tui import TUI, get_console
 
 console = get_console()
@@ -479,34 +481,124 @@ class CLI:
         return rows
 
 
-@click.command()
-@click.argument("prompt", required=False)
-@click.option(
-    "--cwd",
-    "-c",
-    type=click.Path(exists=True, file_okay=False, path_type=Path),
-    help="Current working directory",
-)
-def main(
-    prompt: str | None,
-    cwd: Path | None,
-):
-    load_dotenv(dotenv_path=(cwd or Path.cwd()) / ".env")
+class HybridCLI:
+    def __init__(self, config: Config):
+        self.config = config
+        self.tui = TUI(config, console)
+        self.orchestrator = HybridOrchestrator(config.cwd)
 
+    async def inspect_team(
+        self,
+        *,
+        goal: str,
+        team: str,
+        team_size: int,
+        strict: bool,
+        verify: VerificationMode,
+        planner_model: str | None,
+        worker_model: str | None,
+        ownership_mode: OwnershipMode,
+    ) -> None:
+        options = TeamSynthesisOptions(
+            team=team,
+            team_size=team_size,
+            strict=strict,
+            verification_mode=verify,
+            planner_model=planner_model,
+            worker_model=worker_model,
+            ownership_mode=ownership_mode,
+        )
+        team_spec = self.orchestrator.inspect_team(goal, options)
+        self.tui.show_team_spec(team_spec)
+
+    async def run(
+        self,
+        *,
+        goal: str,
+        team: str,
+        team_size: int,
+        strict: bool,
+        parallel: bool,
+        max_parallel_agents: int,
+        verify: VerificationMode,
+        planner_model: str | None,
+        worker_model: str | None,
+        dry_run: bool,
+        show_task_graph: bool,
+        show_team: bool,
+        apply_patches: bool,
+        ownership_mode: OwnershipMode,
+    ) -> None:
+        request = HybridRunRequest(
+            goal=goal,
+            workspace_root=self.config.cwd,
+            team=team,
+            team_size=team_size,
+            strict=strict,
+            parallel=parallel,
+            max_parallel_agents=max_parallel_agents,
+            verify=verify,
+            planner_model=planner_model,
+            worker_model=worker_model,
+            dry_run=dry_run,
+            apply_patches=apply_patches,
+            ownership_mode=ownership_mode,
+        )
+        result = await self.orchestrator.run(request)
+        if show_team or self.config.hybrid.show_team:
+            self.tui.show_team_spec(result.team_spec)
+        if show_task_graph or self.config.hybrid.show_task_graph:
+            self.tui.show_task_graph(result.task_graph)
+        if result.commit_decision:
+            self.tui.show_commit_decision(result.commit_decision)
+        console.print(f"[success]Hybrid session: {result.session_id}[/success]")
+
+    async def show_task_graph(self, session_id: str) -> None:
+        task_graph = self.orchestrator.show_task_graph(session_id)
+        self.tui.show_task_graph(task_graph)
+
+    def show_locks(self) -> None:
+        self.tui.show_locks(self.orchestrator.show_locks())
+
+    async def apply_pending_patches(self, session_id: str) -> None:
+        decision = await self.orchestrator.apply_pending_patches(session_id)
+        self.tui.show_commit_decision(decision)
+
+
+def _load_runtime_config(cwd: Path | None, *, require_api_key: bool) -> Config:
+    load_dotenv(dotenv_path=(cwd or Path.cwd()) / ".env")
+    config = load_config(cwd=cwd)
+    errors = config.validate(require_api_key=require_api_key)
+    if errors:
+        for error in errors:
+            console.print(f"[error]{error}[/error]")
+        raise click.ClickException("Invalid configuration")
+    return config
+
+
+TEAM_CHOICES = ["auto", *list_team_presets()]
+VERIFY_CHOICES = [mode.value for mode in VerificationMode]
+OWNERSHIP_CHOICES = [mode.value for mode in OwnershipMode]
+HYBRID_COMMANDS = {
+    "chat",
+    "run",
+    "inspect-team",
+    "show-task-graph",
+    "show-locks",
+    "apply-pending-patches",
+    "--help",
+    "-h",
+}
+
+
+def _run_legacy(prompt: str | None, cwd: Path | None) -> None:
     try:
-        config = load_config(cwd=cwd)
+        config = _load_runtime_config(cwd, require_api_key=True)
     except Exception as error:
         console.print(f"[error]Configuration Error: {error}[/error]")
         sys.exit(1)
 
-    errors = config.validate()
-    if errors:
-        for error in errors:
-            console.print(f"[error]{error}[/error]")
-        sys.exit(1)
-
     cli = CLI(config)
-
     if prompt:
         result = asyncio.run(cli.run_single(prompt))
         if result is None:
@@ -515,5 +607,170 @@ def main(
         asyncio.run(cli.run_interactive())
 
 
-main()
+def _build_hybrid_cli(cwd: Path | None) -> HybridCLI:
+    try:
+        config = _load_runtime_config(cwd, require_api_key=False)
+    except Exception as error:
+        console.print(f"[error]Configuration Error: {error}[/error]")
+        sys.exit(1)
+    return HybridCLI(config)
 
+
+def _resolve_hybrid_flag(current, fallback):
+    return fallback if current is None else current
+
+
+@click.command(name="chat")
+@click.argument("prompt", required=False)
+@click.option(
+    "--cwd",
+    "-c",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Current working directory",
+)
+def legacy_main(prompt: str | None, cwd: Path | None) -> None:
+    _run_legacy(prompt, cwd)
+
+
+@click.group()
+def hybrid_main() -> None:
+    """Hybrid multi-agent operating system commands."""
+
+
+@hybrid_main.command("chat")
+@click.argument("prompt", required=False)
+@click.option(
+    "--cwd",
+    "-c",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Current working directory",
+)
+def chat_command(prompt: str | None, cwd: Path | None) -> None:
+    _run_legacy(prompt, cwd)
+
+
+@hybrid_main.command("run")
+@click.argument("goal")
+@click.option("--cwd", "-c", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--team", type=click.Choice(TEAM_CHOICES), default=None)
+@click.option("--team-size", type=int, default=None)
+@click.option("--strict/--no-strict", default=None)
+@click.option("--parallel/--no-parallel", default=None)
+@click.option("--max-parallel-agents", type=int, default=None)
+@click.option("--verify", type=click.Choice(VERIFY_CHOICES), default=None)
+@click.option("--planner-model", type=str, default=None)
+@click.option("--worker-model", type=str, default=None)
+@click.option("--dry-run/--no-dry-run", default=None)
+@click.option("--show-task-graph/--no-show-task-graph", default=None)
+@click.option("--show-team/--no-show-team", default=None)
+@click.option("--apply-patches/--no-apply-patches", default=None)
+@click.option("--ownership-mode", type=click.Choice(OWNERSHIP_CHOICES), default=None)
+def run_command(
+    goal: str,
+    cwd: Path | None,
+    team: str | None,
+    team_size: int | None,
+    strict: bool | None,
+    parallel: bool | None,
+    max_parallel_agents: int | None,
+    verify: str | None,
+    planner_model: str | None,
+    worker_model: str | None,
+    dry_run: bool | None,
+    show_task_graph: bool | None,
+    show_team: bool | None,
+    apply_patches: bool | None,
+    ownership_mode: str | None,
+) -> None:
+    hybrid = _build_hybrid_cli(cwd)
+    config = hybrid.config.hybrid
+    asyncio.run(
+        hybrid.run(
+            goal=goal,
+            team=team or config.team,
+            team_size=team_size or config.team_size,
+            strict=_resolve_hybrid_flag(strict, config.strict),
+            parallel=_resolve_hybrid_flag(parallel, config.parallel),
+            max_parallel_agents=max_parallel_agents or config.max_parallel_agents,
+            verify=VerificationMode(verify or config.verify.value),
+            planner_model=planner_model or config.planner_model,
+            worker_model=worker_model or config.worker_model,
+            dry_run=_resolve_hybrid_flag(dry_run, config.dry_run),
+            show_task_graph=_resolve_hybrid_flag(show_task_graph, config.show_task_graph),
+            show_team=_resolve_hybrid_flag(show_team, config.show_team) or True,
+            apply_patches=_resolve_hybrid_flag(apply_patches, config.apply_patches),
+            ownership_mode=OwnershipMode(ownership_mode or config.ownership_mode.value),
+        )
+    )
+
+
+@hybrid_main.command("inspect-team")
+@click.option("--goal", required=True)
+@click.option("--cwd", "-c", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--team", type=click.Choice(TEAM_CHOICES), default=None)
+@click.option("--team-size", type=int, default=None)
+@click.option("--strict/--no-strict", default=None)
+@click.option("--verify", type=click.Choice(VERIFY_CHOICES), default=None)
+@click.option("--planner-model", type=str, default=None)
+@click.option("--worker-model", type=str, default=None)
+@click.option("--ownership-mode", type=click.Choice(OWNERSHIP_CHOICES), default=None)
+def inspect_team_command(
+    goal: str,
+    cwd: Path | None,
+    team: str | None,
+    team_size: int | None,
+    strict: bool | None,
+    verify: str | None,
+    planner_model: str | None,
+    worker_model: str | None,
+    ownership_mode: str | None,
+) -> None:
+    hybrid = _build_hybrid_cli(cwd)
+    config = hybrid.config.hybrid
+    asyncio.run(
+        hybrid.inspect_team(
+            goal=goal,
+            team=team or config.team,
+            team_size=team_size or config.team_size,
+            strict=_resolve_hybrid_flag(strict, config.strict),
+            verify=VerificationMode(verify or config.verify.value),
+            planner_model=planner_model or config.planner_model,
+            worker_model=worker_model or config.worker_model,
+            ownership_mode=OwnershipMode(ownership_mode or config.ownership_mode.value),
+        )
+    )
+
+
+@hybrid_main.command("show-task-graph")
+@click.option("--session", "session_id", required=True)
+@click.option("--cwd", "-c", type=click.Path(exists=True, file_okay=False, path_type=Path))
+def show_task_graph_command(session_id: str, cwd: Path | None) -> None:
+    hybrid = _build_hybrid_cli(cwd)
+    asyncio.run(hybrid.show_task_graph(session_id))
+
+
+@hybrid_main.command("show-locks")
+@click.option("--cwd", "-c", type=click.Path(exists=True, file_okay=False, path_type=Path))
+def show_locks_command(cwd: Path | None) -> None:
+    hybrid = _build_hybrid_cli(cwd)
+    hybrid.show_locks()
+
+
+@hybrid_main.command("apply-pending-patches")
+@click.option("--session", "session_id", required=True)
+@click.option("--cwd", "-c", type=click.Path(exists=True, file_okay=False, path_type=Path))
+def apply_pending_patches_command(session_id: str, cwd: Path | None) -> None:
+    hybrid = _build_hybrid_cli(cwd)
+    asyncio.run(hybrid.apply_pending_patches(session_id))
+
+
+def entrypoint() -> None:
+    argv = sys.argv[1:]
+    if argv and argv[0] in HYBRID_COMMANDS:
+        hybrid_main(standalone_mode=True)
+        return
+    legacy_main(standalone_mode=True)
+
+
+if __name__ == "__main__":
+    entrypoint()

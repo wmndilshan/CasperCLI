@@ -24,6 +24,7 @@ CasperCode is a powerful AI agent framework designed for software development ta
 - **Custom Agent Design** - AI-powered agent creation with `/agents design`
 - **A2A Communication** - Agent-to-Agent messaging for task assignment, status updates, and handoffs
 - **Team Management** - Add, remove, inspect agents dynamically
+- **Hybrid Multi-Agent OS** - Structured team synthesis, DAG scheduling, lock-aware execution, transactional patches, conflict detection, and verification-gated integration
 
 ### 🔧 Tool Ecosystem
 
@@ -122,17 +123,34 @@ DEBUG=0
 ### Running CasperCode
 
 ```bash
+# Create a local virtual environment with uv
+uv venv .venv
+UV_CACHE_DIR=/tmp/uv-cache uv pip install --python .venv/bin/python -r requirements.txt
+
 # Interactive mode
-python main.py
+.venv/bin/python main.py
 
 # Single prompt mode
-python main.py "Refactor the auth module to use JWT tokens"
+.venv/bin/python main.py "Refactor the auth module to use JWT tokens"
 
 # Specify working directory
-python main.py --cwd /path/to/project "Analyze this codebase"
+.venv/bin/python main.py --cwd /path/to/project "Analyze this codebase"
+
+# Hybrid runtime mode
+.venv/bin/python main.py run "add JWT auth, admin dashboard, tests, docker" --team auto --team-size 6 --strict --parallel --verify strict --show-team --show-task-graph
+.venv/bin/python main.py inspect-team --goal "build RAG API with evaluation" --team-size 5
 ```
 
 ## CLI Commands
+
+### Hybrid Runtime
+| Command | Description |
+|---------|-------------|
+| `run "<goal>" --team <preset|auto>` | Execute the hybrid DAG runtime |
+| `inspect-team --goal "<goal>"` | Preview synthesized team topology |
+| `show-task-graph --session <id>` | Inspect a persisted hybrid session DAG |
+| `show-locks` | Show active runtime locks |
+| `apply-pending-patches --session <id>` | Apply staged proposals from a hybrid session |
 
 ### Session Management
 | Command | Description |
@@ -178,59 +196,45 @@ python main.py --cwd /path/to/project "Analyze this codebase"
 
 ## Configuration File
 
-Create `config.yaml` in your working directory:
+Create `.ai-agent/config.toml` in your working directory:
 
-```yaml
-model:
-  name: deepseek-chat
-  temperature: 1
-  context_window: 256000
+```toml
+[model]
+name = "deepseek-chat"
+temperature = 1
+context_window = 256000
 
-cwd: .
-approval: on-request
-max_turns: 100
-hooks_enabled: false
+cwd = "."
+approval = "on-request"
+max_turns = 100
+hooks_enabled = false
 
-# Tool allowlisting (optional)
-allowed_tools:
-  - read_file
-  - write_file
-  - edit_file
-  - grep_search
+allowed_tools = ["read_file", "write_file", "edit_file", "grep_search"]
 
-# MCP Servers
-mcp_servers:
-  filesystem:
-    command: npx
-    args: ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allowed/dir"]
-    startup_timeout_sec: 10
-  
-  fetch:
-    url: https://your-mcp-server.com/sse
+[mcp_servers.filesystem]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allowed/dir"]
+startup_timeout_sec = 10
 
-# Shell Environment
-shell_environment:
-  ignore_default_excludes: false
-  exclude_patterns:
-    - "*KEY*"
-    - "*TOKEN*"
-    - "*SECRET*"
-  set_vars:
-    CUSTOM_VAR: value
+[mcp_servers.fetch]
+url = "https://your-mcp-server.com/sse"
 
-# Instructions
-developer_instructions: |
-  You are a helpful coding assistant...
+[shell_environment]
+ignore_default_excludes = false
 
-user_instructions: |
-  Always use TypeScript for new files...
+[shell_environment.set_vars]
+CUSTOM_VAR = "value"
 
-# Hooks
-hooks:
-  - name: pre-run
-    trigger: before_agent
-    command: echo "Starting session"
-    timeout_sec: 30
+[hybrid]
+team = "auto"
+team_size = 4
+strict = true
+parallel = true
+max_parallel_agents = 4
+verify = "strict"
+show_team = true
+show_task_graph = true
+ownership_mode = "strict"
 ```
 
 ## Architecture
@@ -345,4 +349,3 @@ pytest
 - Built with [Rich](https://github.com/Textualize/rich) for beautiful terminal UI
 - Uses [Inngest](https://www.inngest.com/) for durable workflows
 - Compatible with DeepSeek, OpenAI, and other OpenAI-compatible providers
-

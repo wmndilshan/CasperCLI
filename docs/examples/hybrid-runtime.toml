@@ -1,0 +1,15 @@
+[hybrid]
+enabled = true
+team = "auto"
+team_size = 6
+strict = true
+parallel = true
+max_parallel_agents = 6
+verify = "strict"
+planner_model = "deepseek-reasoner"
+worker_model = "deepseek-coder"
+dry_run = false
+show_task_graph = true
+show_team = true
+apply_patches = false
+ownership_mode = "strict"
